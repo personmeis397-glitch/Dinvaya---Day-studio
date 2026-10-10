@@ -1,13 +1,18 @@
 {
   "name": "Dinvaya Day Studio",
   "short_name": "Dinvaya",
+  "description": "Dinvaya is a personal journal and day planner with Today, Journal, Board, Habits, Calendar and Stats.",
+  "id": "/Dinvaya---Day-studio/",
   "start_url": "/Dinvaya---Day-studio/index.html",
   "scope": "/Dinvaya---Day-studio/",
   "display": "standalone",
-  "background_color": "#ffffff",
-  "theme_color": "#ffffff",
+  "orientation": "portrait",
+  "background_color": "#2b0615",
+  "theme_color": "#2b0615",
+  "lang": "en",
+  "categories": ["lifestyle", "productivity"],
   "icons": [
-    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
   ]
 }
