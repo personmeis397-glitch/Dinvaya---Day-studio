@@ -308,7 +308,9 @@ document.readyState==="complete"?boot():addEventListener("load",boot)
      this schedules phone alarms for every reminder so they ring even when
      the app is closed. It only READS the app's saved data (localStorage "cd1"),
      it never changes it. In a normal browser it does nothing. */
-  var CH = "dv-reminders", MAXN = 200, DAYS = 30, SOON = 120000;
+  var MAXN = 200, DAYS = 30, SOON = 120000;
+  var CHANNELS = [["sunrise", "Task reminder melody"], ["cheer", "Cheerful melody"], ["chime", "Chime"], ["bell", "Bell"], ["soft", "Soft harp"], ["sparkle", "Sparkle"], ["beep", "Beep"], ["silent", "Silent reminders"]];
+  var VALID = { cheer: 1, chime: 1, bell: 1, soft: 1, sparkle: 1, beep: 1 };
   var LN = null, raw = null, G = null, lastSig = "", running = false, again = false;
 
   function getLN() {
@@ -332,28 +334,31 @@ document.readyState==="complete"?boot():addEventListener("load",boot)
   function plan(force) {
     var out = [], g = loadG(), now = Date.now(), vis = !document.hidden && !force;
     if (g && g.set && g.set.rem === false) return { items: [], hab: null };
+    var snd = (g && g.set && g.set.snd) || "cheer";
+    var chTask = snd === "none" ? "dv-silent" : "dv-sunrise";
+    var chOther = snd === "none" ? "dv-silent" : "dv-" + (VALID[snd] ? snd : "cheer");
     var days = (g && g.days) || {};
     var limit = now + DAYS * 864e5;
     Object.keys(days).forEach(function (k) {
       var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(k); if (!m) return;
       var d = days[k]; if (!d) return;
-      function add(min, kind, idx, title, body) {
+      function add(min, kind, idx, title, body, ch) {
         var at = new Date(+m[1], +m[2] - 1, +m[3], Math.floor(min / 60), min % 60, 0, 0).getTime();
         if (!(at > now + 5000) || at > limit) return;
         if (vis && at - now < SOON) return;   /* the open app rings these itself */
-        out.push({ id: hash(k + "|" + kind + "|" + idx + "|" + min), at: at, title: title, body: body });
+        out.push({ id: hash(k + "|" + kind + "|" + idx + "|" + min), at: at, title: title, body: body, ch: ch });
       }
       (d.tasks || []).forEach(function (t, i) {
         if (!t || !t.at || t.d || t.fd) return;
         var p = String(t.at).split(":"), min = 60 * (+p[0] || 0) + (+p[1] || 0);
-        add(min, "t", i, "🔔 Task reminder", String(t.t || "Task"));
+        add(min, "t", i, "🔔 Task reminder", String(t.t || "Task"), chTask);
       });
       var so = d.so || {};
       Object.keys(so).forEach(function (s) {
         var e = so[s]; if (!e || !e.n || e.fd) return;
         var min = e.az != null ? +e.az : +s; if (isNaN(min)) return;
         var label = (d.slots && d.slots[s]) || e.l || fmt(+s);
-        add(min, "s", s, "🔔 Time for: " + label, fmt(+s));
+        add(min, "s", s, "🔔 Time for: " + label, fmt(+s), chOther);
       });
     });
     out.sort(function (a, b) { return a.at - b.at; });
@@ -362,7 +367,7 @@ document.readyState==="complete"?boot():addEventListener("load",boot)
     if (hc.on && /^\d{2}:\d{2}$/.test(hc.time || "") && habits.length) {
       var names = habits.map(function (h) { return h && h.n ? String(h.n) : ""; }).filter(Boolean).slice(0, 4);
       var hp = hc.time.split(":");
-      hab = { id: hash("habits-daily"), hour: +hp[0], minute: +hp[1], body: names.length ? names.join(", ") : "Check in with your habits" };
+      hab = { id: hash("habits-daily"), hour: +hp[0], minute: +hp[1], body: names.length ? names.join(", ") : "Check in with your habits", ch: chOther };
     }
     return { items: out, hab: hab };
   }
@@ -376,11 +381,11 @@ document.readyState==="complete"?boot():addEventListener("load",boot)
     var keep = {}, notes = [];
     p.items.forEach(function (x) {
       keep[x.id] = 1;
-      notes.push({ id: x.id, title: x.title, body: x.body, channelId: CH, schedule: { at: new Date(x.at), allowWhileIdle: true } });
+      notes.push({ id: x.id, title: x.title, body: x.body, channelId: x.ch, schedule: { at: new Date(x.at), allowWhileIdle: true } });
     });
     if (p.hab) {
       keep[p.hab.id] = 1;
-      notes.push({ id: p.hab.id, title: "✦ Time for your habits", body: p.hab.body, channelId: CH, schedule: { on: { hour: p.hab.hour, minute: p.hab.minute }, allowWhileIdle: true } });
+      notes.push({ id: p.hab.id, title: "✦ Time for your habits", body: p.hab.body, channelId: p.hab.ch, schedule: { on: { hour: p.hab.hour, minute: p.hab.minute }, allowWhileIdle: true } });
     }
     /* schedule first (same id replaces the old alarm), then remove stale ones, so a
        half-finished sync can never leave you with no alarms */
@@ -437,7 +442,9 @@ document.readyState==="complete"?boot():addEventListener("load",boot)
   (function boot() {
     LN = getLN();
     if (!LN) { if (++tries < 40) setTimeout(boot, 500); return; }
-    LN.createChannel({ id: CH, name: "Reminders", description: "Task, schedule and habit reminders", importance: 5, visibility: 1, vibration: true, lights: true }).catch(function () {});
+    CHANNELS.forEach(function (c) {
+      LN.createChannel({ id: "dv-" + c[0], name: c[1], description: "Reminder alerts", importance: 5, visibility: 1, vibration: true, lights: true, sound: "dv_" + c[0] + ".wav" }).catch(function () {});
+    });
     var pend = 0;
     new MutationObserver(function () { if (!pend) { pend = 1; requestAnimationFrame(function () { pend = 0; decorate(); }); } }).observe(document.body, { childList: true, subtree: true });
     document.addEventListener("change", function (e) { if (e.target && (e.target.id === "dvHabOn" || e.target.id === "dvHabT")) saveHab(); });
