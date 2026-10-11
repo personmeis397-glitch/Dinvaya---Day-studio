@@ -1,15 +1,19 @@
 name: Build Android app
 
+# Press "Run workflow" in the Actions tab to build the APK.
+# bundled = your index.html is packed inside the app (needs a rebuild for every change)
+# live    = the app opens your website (updates need no rebuild)
+
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "live (recommended) or bundled"
+        description: "bundled (recommended) or live"
         type: choice
         options:
-          - live
           - bundled
-        default: live
+          - live
+        default: bundled
 
 permissions:
   contents: write
@@ -18,7 +22,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      MODE: ${{ inputs.mode || 'live' }}
+      MODE: ${{ inputs.mode || 'bundled' }}
     steps:
       - name: Get your files
         uses: actions/checkout@v4
@@ -46,7 +50,7 @@ jobs:
             echo '<!doctype html><title>Dinvaya</title>' > www/index.html
           fi
           node -e '
-            const live = process.env.MODE !== "bundled";
+            const live = process.env.MODE === "live";
             const c = {
               appId: "com.dinvaya.daystudio",
               appName: "Dinvaya Day Studio",
@@ -82,11 +86,85 @@ jobs:
             done
           fi
 
+      - name: Make the reminder ringtones (same melodies as your app)
+        run: |
+          python3 - app/android/app/src/main/res/raw <<'PY'
+          import math, struct, wave, os, sys
+          out = sys.argv[1]
+          os.makedirs(out, exist_ok=True)
+          SR = 24000
+          def wave_fn(kind, ph):
+              x = ph % 1.0
+              if kind == "sine": return math.sin(2 * math.pi * x)
+              if kind == "square": return 1.0 if x < 0.5 else -1.0
+              return 4 * abs(x - 0.5) - 1          # triangle
+          # [pattern seconds, notes (freq, start, dur, type, gain), total seconds], copied from the app
+          S = {
+           "sunrise": [2.4, [(f, t, .55, "triangle", .5) for f, t in [(784,0),(988,.14),(1175,.28),(1568,.42),(1175,.7),(1568,.84),(1976,.98),(1568,1.4),(1976,1.54),(2349,1.68)]]
+                           + [(2*f, t, .35, "sine", .18) for f, t in [(784,0),(988,.14),(1175,.28),(1568,.42),(1175,.7),(1568,.84),(1976,.98),(1568,1.4),(1976,1.54),(2349,1.68)]]
+                           + [(f/2, t, .5, "sine", .22) for f, t in [(784,0),(988,.14),(1175,.28),(1568,.42),(1175,.7),(1568,.84),(1976,.98),(1568,1.4),(1976,1.54),(2349,1.68)]], 30],
+           "cheer": [2.5, [(f, t, .4, "triangle", .22) for f, t in [(523.25,0),(659.25,.15),(783.99,.3),(1046.5,.45),(783.99,.78),(1046.5,.93),(1318.5,1.08),(1046.5,1.45),(1318.5,1.6),(1568,1.78)]]
+                          + [(2*f, t, .25, "sine", .05) for f, t in [(523.25,0),(659.25,.15),(783.99,.3),(1046.5,.45),(783.99,.78),(1046.5,.93),(1318.5,1.08),(1046.5,1.45),(1318.5,1.6),(1568,1.78)]], 10],
+           "chime": [2, [(f, .18*i, .9, "sine", .28) for i, f in enumerate([880, 1318.5, 1760])], 10],
+           "bell": [2.5, [(660,0,1.8,"sine",.3),(1320,0,1.2,"sine",.15),(1980,0,.8,"sine",.08),(660,.9,1.6,"sine",.25)], 10],
+           "soft": [2, [(f, .22*i, .7, "triangle", .25) for i, f in enumerate([523.25, 659.25, 783.99, 1046.5])], 10],
+           "sparkle": [2, [(f, .1*i, .5, "triangle", .18) for i, f in enumerate([1046.5, 1318.5, 1568, 2093, 1568, 2637])], 10],
+           "beep": [1, [(880, t, .15, "square", .12) for t in (0, .25, .5)], 10],
+          }
+          def render(name, pattern, notes, total):
+              n = int(total * SR)
+              buf = [0.0] * n
+              reps = max(1, int(total // pattern))
+              for r in range(reps):
+                  for f, st, dur, kind, gain in notes:
+                      start = int((r * pattern + st) * SR)
+                      length = int((dur + 0.05) * SR)
+                      a_end = 0.02
+                      for i in range(length):
+                          j = start + i
+                          if j >= n: break
+                          t = i / SR
+                          if t < a_end: env = 1e-4 * (gain / 1e-4) ** (t / a_end)
+                          elif t < dur: env = gain * (1e-4 / gain) ** ((t - a_end) / (dur - a_end))
+                          else: env = 0.0
+                          buf[j] += env * wave_fn(kind, f * t)
+              peak = max(abs(x) for x in buf) or 1
+              scale = 0.9 / peak
+              path = os.path.join(out, "dv_%s.wav" % name)
+              with wave.open(path, "wb") as w:
+                  w.setnchannels(1); w.setsampwidth(2); w.setframerate(SR)
+                  w.writeframes(b"".join(struct.pack("<h", int(max(-1, min(1, x * scale)) * 32767)) for x in buf))
+          for name, (pattern, notes, total) in S.items():
+              render(name, pattern, notes, total)
+          with wave.open(os.path.join(out, "dv_silent.wav"), "wb") as w:
+              w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000)
+              w.writeframes(b"\x00\x00" * 4000)
+          print("ringtones written to", out)
+          PY
+
+      - name: Make the reminder sound repeat until you open or swipe it away
+        run: |
+          F=$(find app/node_modules/@capacitor/local-notifications/android -name LocalNotificationManager.java | head -n 1)
+          echo "Plugin file: $F"
+          grep -n "\.notify(" "$F" || true
+          cp "$F" "$F.orig"
+          perl -0pi -e 's/(\w+)\.notify\(([^,;()]+(?:\(\))?),\s*(\w+)\);/$3.flags |= android.app.Notification.FLAG_INSISTENT; $1.notify($2, $3);/g' "$F"
+          if grep -q FLAG_INSISTENT "$F"; then
+            echo "Repeat-until-dismissed change applied"
+          else
+            echo "::warning::Could not apply the repeat-until-dismissed change; alerts will ring once"
+          fi
+
       - name: Build the APK
         run: |
           cd app/android
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
+          if ! ./gradlew assembleDebug --no-daemon; then
+            echo "::warning::Build failed with the repeat change, building again without it"
+            F=$(find ../node_modules/@capacitor/local-notifications/android -name LocalNotificationManager.java | head -n 1)
+            cp "$F.orig" "$F"
+            ./gradlew assembleDebug --no-daemon
+          fi
           cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/Dinvaya.apk"
 
       - name: Publish the APK as a release
