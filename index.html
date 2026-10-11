@@ -301,4 +301,152 @@ document.addEventListener("click",function(e){var b=e.target.closest&&e.target.c
 function boot(){if(seen())return;var n=0,w=setInterval(function(){n++;if(!document.querySelector("#splash")&&window.dvSup&&!R){clearInterval(w);open()}else if(n>60)clearInterval(w)},250)}
 document.readyState==="complete"?boot():addEventListener("load",boot)
 })();
-</script><script id="dvSmoothJs">(function(){var B=document.body,on=0;function s(){if(!on){on=1;B.classList.add("dvdrag")}}function e(){if(on){on=0;B.classList.remove("dvdrag")}}document.addEventListener("pointerdown",function(t){var x=t.target&&t.target.closest&&t.target.closest(".it");if(x)s()},true);document.addEventListener("pointerup",e,true);document.addEventListener("pointercancel",e,true);addEventListener("blur",e);document.addEventListener("visibilitychange",e)})();</script></body></html>
+</script><script id="dvSmoothJs">(function(){var B=document.body,on=0;function s(){if(!on){on=1;B.classList.add("dvdrag")}}function e(){if(on){on=0;B.classList.remove("dvdrag")}}document.addEventListener("pointerdown",function(t){var x=t.target&&t.target.closest&&t.target.closest(".it");if(x)s()},true);document.addEventListener("pointerup",e,true);document.addEventListener("pointercancel",e,true);addEventListener("blur",e);document.addEventListener("visibilitychange",e)})();</script><script id="dv-native-alarms">
+(function () {
+  "use strict";
+  /* Dinvaya native alarms: when the app runs inside the Android wrapper,
+     this schedules phone alarms for every reminder so they ring even when
+     the app is closed. It only READS the app's saved data (localStorage "cd1"),
+     it never changes it. In a normal browser it does nothing. */
+  var CH = "dv-reminders", MAXN = 200, DAYS = 30, SOON = 120000;
+  var LN = null, raw = null, G = null, lastSig = "", running = false, again = false;
+
+  function getLN() {
+    try {
+      var c = window.Capacitor;
+      if (c && c.isNativePlatform && c.isNativePlatform() && c.Plugins && c.Plugins.LocalNotifications) return c.Plugins.LocalNotifications;
+    } catch (e) {}
+    return null;
+  }
+  function pad(n) { return (n < 10 ? "0" : "") + n; }
+  function fmt(m) { m = ((m % 1440) + 1440) % 1440; var h = Math.floor(m / 60), x = m % 60; return (h % 12 || 12) + ":" + pad(x) + " " + (h < 12 ? "AM" : "PM"); }
+  function hash(s) { var h = 2166136261; for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0) % 2147483000 + 1; }
+  function habCfg() { try { var c = JSON.parse(localStorage.getItem("dvHabRem") || "null"); return c && typeof c === "object" ? c : {}; } catch (e) { return {}; } }
+  function loadG() {
+    var r = null;
+    try { r = localStorage.getItem("cd1"); } catch (e) {}
+    if (r !== raw) { raw = r; try { G = r ? JSON.parse(r) : null; } catch (e) { G = null; } }
+    return G;
+  }
+
+  function plan(force) {
+    var out = [], g = loadG(), now = Date.now(), vis = !document.hidden && !force;
+    if (g && g.set && g.set.rem === false) return { items: [], hab: null };
+    var days = (g && g.days) || {};
+    var limit = now + DAYS * 864e5;
+    Object.keys(days).forEach(function (k) {
+      var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(k); if (!m) return;
+      var d = days[k]; if (!d) return;
+      function add(min, kind, idx, title, body) {
+        var at = new Date(+m[1], +m[2] - 1, +m[3], Math.floor(min / 60), min % 60, 0, 0).getTime();
+        if (!(at > now + 5000) || at > limit) return;
+        if (vis && at - now < SOON) return;   /* the open app rings these itself */
+        out.push({ id: hash(k + "|" + kind + "|" + idx + "|" + min), at: at, title: title, body: body });
+      }
+      (d.tasks || []).forEach(function (t, i) {
+        if (!t || !t.at || t.d || t.fd) return;
+        var p = String(t.at).split(":"), min = 60 * (+p[0] || 0) + (+p[1] || 0);
+        add(min, "t", i, "🔔 Task reminder", String(t.t || "Task"));
+      });
+      var so = d.so || {};
+      Object.keys(so).forEach(function (s) {
+        var e = so[s]; if (!e || !e.n || e.fd) return;
+        var min = e.az != null ? +e.az : +s; if (isNaN(min)) return;
+        var label = (d.slots && d.slots[s]) || e.l || fmt(+s);
+        add(min, "s", s, "🔔 Time for: " + label, fmt(+s));
+      });
+    });
+    out.sort(function (a, b) { return a.at - b.at; });
+    out = out.slice(0, MAXN);
+    var hab = null, hc = habCfg(), habits = (g && g.habits) || [];
+    if (hc.on && /^\d{2}:\d{2}$/.test(hc.time || "") && habits.length) {
+      var names = habits.map(function (h) { return h && h.n ? String(h.n) : ""; }).filter(Boolean).slice(0, 4);
+      var hp = hc.time.split(":");
+      hab = { id: hash("habits-daily"), hour: +hp[0], minute: +hp[1], body: names.length ? names.join(", ") : "Check in with your habits" };
+    }
+    return { items: out, hab: hab };
+  }
+
+  function sync(force) {
+    if (!LN) return;
+    if (running) { again = again || force; return; }
+    running = true;
+    var p = plan(force), sig = JSON.stringify(p) + "|" + (force ? "f" : "v");
+    if (sig === lastSig) { running = false; return; }
+    var keep = {}, notes = [];
+    p.items.forEach(function (x) {
+      keep[x.id] = 1;
+      notes.push({ id: x.id, title: x.title, body: x.body, channelId: CH, schedule: { at: new Date(x.at), allowWhileIdle: true } });
+    });
+    if (p.hab) {
+      keep[p.hab.id] = 1;
+      notes.push({ id: p.hab.id, title: "✦ Time for your habits", body: p.hab.body, channelId: CH, schedule: { on: { hour: p.hab.hour, minute: p.hab.minute }, allowWhileIdle: true } });
+    }
+    /* schedule first (same id replaces the old alarm), then remove stale ones, so a
+       half-finished sync can never leave you with no alarms */
+    var job = notes.length ? LN.schedule({ notifications: notes }) : Promise.resolve();
+    job.then(function () { return LN.getPending(); })
+      .then(function (r) {
+        var stale = ((r && r.notifications) || []).filter(function (n) { return !keep[n.id]; }).map(function (n) { return { id: n.id }; });
+        return stale.length ? LN.cancel({ notifications: stale }) : null;
+      })
+      .then(function () { lastSig = sig; })
+      .catch(function () { lastSig = ""; })
+      .then(function () { running = false; if (again) { again = false; sync(true); } });
+  }
+
+  function askPermissions() {
+    LN.checkPermissions().then(function (r) {
+      if (r && r.display === "granted") return r;
+      return LN.requestPermissions();
+    }).then(function () {
+      if (!LN.checkExactNotificationSetting) return;
+      return LN.checkExactNotificationSetting().then(function (r) {
+        var asked = false; try { asked = localStorage.getItem("dvExactAsked") === "1"; } catch (e) {}
+        if (r && r.exact_alarm !== "granted" && !asked) {
+          try { localStorage.setItem("dvExactAsked", "1"); } catch (e) {}
+          if (window.confirm("To ring exactly on time, please allow “Alarms & reminders” for Dinvaya on the next screen.")) return LN.changeExactNotificationSetting();
+        }
+      });
+    }).catch(function () {}).then(function () { sync(true); });
+  }
+
+  /* settings: a daily habit reminder row + a corrected sentence */
+  function decorate() {
+    var b = document.querySelector('button[data-act="notif"]');
+    if (!b) return;
+    var box = b.closest(".opt"); if (!box) return;
+    var sub = box.querySelector("p.sub");
+    if (sub && /while the planner is open/.test(sub.textContent)) sub.textContent = "Give any task or schedule slot a time and you get an alert with sound. Reminders also ring when the app is closed.";
+    if (document.getElementById("dvHab")) return;
+    var c = habCfg(), d = document.createElement("div");
+    d.className = "opt"; d.id = "dvHab";
+    d.innerHTML = '<b>Habit reminder</b><p class="sub">One gentle reminder every day to check in with your habits.</p>' +
+      '<label class="row"><input type="checkbox" class="chk" id="dvHabOn"' + (c.on ? " checked" : "") + '> Remind me about my habits</label>' +
+      '<div class="row"><span>At</span><input type="time" class="in" id="dvHabT" value="' + (c.time || "20:00") + '" aria-label="Habit reminder time"></div>';
+    box.parentNode.insertBefore(d, box.nextSibling);
+  }
+  function saveHab() {
+    var on = document.getElementById("dvHabOn"), t = document.getElementById("dvHabT");
+    if (!on || !t) return;
+    try { localStorage.setItem("dvHabRem", JSON.stringify({ on: !!on.checked, time: t.value || "20:00" })); } catch (e) {}
+    sync(true);
+  }
+
+  var tries = 0;
+  (function boot() {
+    LN = getLN();
+    if (!LN) { if (++tries < 40) setTimeout(boot, 500); return; }
+    LN.createChannel({ id: CH, name: "Reminders", description: "Task, schedule and habit reminders", importance: 5, visibility: 1, vibration: true, lights: true }).catch(function () {});
+    var pend = 0;
+    new MutationObserver(function () { if (!pend) { pend = 1; requestAnimationFrame(function () { pend = 0; decorate(); }); } }).observe(document.body, { childList: true, subtree: true });
+    document.addEventListener("change", function (e) { if (e.target && (e.target.id === "dvHabOn" || e.target.id === "dvHabT")) saveHab(); });
+    document.addEventListener("click", function (e) { if (e.target && e.target.closest && e.target.closest('button[data-act="notif"]')) setTimeout(askPermissions, 600); });
+    document.addEventListener("visibilitychange", function () { sync(document.hidden); });
+    addEventListener("pagehide", function () { sync(true); });
+    setInterval(function () { sync(false); }, 20000);
+    askPermissions();
+  })();
+})();
+
+</script></body></html>
