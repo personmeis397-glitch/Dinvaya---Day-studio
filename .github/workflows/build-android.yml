@@ -1,0 +1,98 @@
+name: Build Android app
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "live (recommended) or bundled"
+        type: choice
+        options:
+          - live
+          - bundled
+        default: live
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      MODE: ${{ inputs.mode || 'live' }}
+    steps:
+      - name: Get your files
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Create the Android project
+        run: |
+          mkdir -p app/www
+          cd app
+          npm init -y
+          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 @capacitor/local-notifications@6
+          if [ "$MODE" = "bundled" ]; then
+            cp ../index.html www/index.html
+          else
+            echo '<!doctype html><title>Dinvaya</title>' > www/index.html
+          fi
+          node -e '
+            const live = process.env.MODE !== "bundled";
+            const c = {
+              appId: "com.dinvaya.daystudio",
+              appName: "Dinvaya Day Studio",
+              webDir: "www",
+              plugins: { LocalNotifications: { smallIcon: "ic_stat_dinvaya" } }
+            };
+            if (live) c.server = { url: "https://personmeis397-glitch.github.io/Dinvaya---Day-studio/" };
+            require("fs").writeFileSync("capacitor.config.json", JSON.stringify(c, null, 2));
+          '
+          npx cap add android
+          npx cap sync android
+
+      - name: Add permissions, app icon and notification icon
+        run: |
+          cd app/android/app/src/main
+          sed -i 's#<application#<uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>\n    <uses-permission android:name="android.permission.VIBRATE"/>\n    <application#' AndroidManifest.xml
+
+          mkdir -p res/drawable
+          cat > res/drawable/ic_stat_dinvaya.xml <<'XML'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+            <path android:fillColor="#FFFFFFFF" android:pathData="M12,2l2.9,6.9L22,9.6l-5.5,4.8L18.2,22L12,18.3L5.8,22l1.7,-7.6L2,9.6l7.1,-0.7z"/>
+          </vector>
+          XML
+
+          if [ -f "$GITHUB_WORKSPACE/icon-512.png" ]; then
+            command -v convert >/dev/null || sudo apt-get install -y imagemagick
+            rm -f res/mipmap-anydpi-v26/*.xml
+            for pair in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
+              d="${pair%%:*}"; s="${pair##*:}"
+              convert "$GITHUB_WORKSPACE/icon-512.png" -resize "${s}x${s}" "res/mipmap-$d/ic_launcher.png"
+              cp "res/mipmap-$d/ic_launcher.png" "res/mipmap-$d/ic_launcher_round.png"
+              rm -f "res/mipmap-$d/ic_launcher_foreground.png"
+            done
+          fi
+
+      - name: Build the APK
+        run: |
+          cd app/android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/Dinvaya.apk"
+
+      - name: Publish the APK as a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "apk-${{ github.run_number }}" Dinvaya.apk \
+            --title "Dinvaya APK build ${{ github.run_number }} ($MODE)" \
+            --notes "Android app with reminders that ring when the app is closed. Mode: $MODE."
