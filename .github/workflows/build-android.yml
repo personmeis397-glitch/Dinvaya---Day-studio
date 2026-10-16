@@ -445,3 +445,18 @@ jobs:
           gh release create "apk-${{ github.run_number }}" Dinvaya.apk \
             --title "Dinvaya APK build ${{ github.run_number }} ($MODE)" \
             --notes "Android app with a real alarm: rings until you press Stop, even when the app is closed. Mode: $MODE."
+
+      - name: Build signed release APK for Amazon
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          cd app/android
+          ./gradlew assembleRelease --no-daemon
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/dinvaya.jks"
+          "$BT/zipalign" -f -p 4 app/build/outputs/apk/release/app-release-unsigned.apk "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" sign --ks "$RUNNER_TEMP/dinvaya.jks" --ks-key-alias dinvaya --ks-pass env:KEY_PASSWORD --key-pass env:KEY_PASSWORD --out "$GITHUB_WORKSPACE/Dinvaya-release.apk" "$RUNNER_TEMP/aligned.apk"
+          cd "$GITHUB_WORKSPACE"
+          gh release upload "apk-${{ github.run_number }}" Dinvaya-release.apk
