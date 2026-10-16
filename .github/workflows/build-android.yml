@@ -86,8 +86,8 @@ jobs:
               cp "res/mipmap-$d/ic_launcher.png" "res/mipmap-$d/ic_launcher_round.png"
               rm -f "res/mipmap-$d/ic_launcher_foreground.png"
             done
-          fi
-                - name: Make the reminder ringtones (same melodies as your app)
+          fi   
+      - name: Make the reminder ringtones (same melodies as your app)
         run: |
           python3 - app/android/app/src/main/res/raw <<'PY'
           import math, struct, wave, os, sys
@@ -159,7 +159,7 @@ jobs:
           else
             echo "::warning::Could not apply the repeat-until-dismissed change; alerts will ring once"
           fi
-                - name: Alarm part 1 - the ringing service
+      - name: Alarm part 1 - the ringing service
         run: |
           J=app/android/app/src/main/java/com/dinvaya/daystudio
           mkdir -p "$J"
@@ -310,7 +310,7 @@ jobs:
           }
 
           JAVA
-                - name: Alarm part 2 - the Stop screen
+      - name: Alarm part 2 - the Stop screen
         run: |
           J=app/android/app/src/main/java/com/dinvaya/daystudio
           cat > "$J/RingActivity.java" <<'JAVA'
@@ -410,7 +410,7 @@ jobs:
           }
 
           JAVA
-                - name: Alarm part 3 - connect it to your reminders
+      - name: Alarm part 3 - connect it to your reminders
         run: |
           F=$(find app/node_modules/@capacitor/local-notifications/android -name TimedNotificationPublisher.java | head -n 1)
           echo "Publisher file: $F"
