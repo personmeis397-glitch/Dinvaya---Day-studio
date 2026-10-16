@@ -415,7 +415,7 @@ jobs:
           F=$(find app/node_modules/@capacitor/local-notifications/android -name TimedNotificationPublisher.java | head -n 1)
           echo "Publisher file: $F"
           cp "$F" "$F.orig"
-          perl -0pi -e 's/(public\s+void\s+onReceive\s*\(\s*Context\s+(\w+)\s*,\s*Intent\s+(\w+)\s*\)\s*\{)/$1\n        try { com.dinvaya.daystudio.RingService.fromIntent($2, $3); } catch (Throwable dvT) {}\n/' "$F"
+          perl -0pi -e 's/(public\s+void\s+onReceive\s*\(\s*Context\s+(\w+)\s*,\s*Intent\s+(\w+)\s*\)\s*\{)/$1\n        try { Class.forName("com.dinvaya.daystudio.RingService").getMethod("fromIntent", android.content.Context.class, android.content.Intent.class).invoke(null, $2, $3); } catch (Throwable dvT) {}\n/' "$F"
           if grep -q RingService "$F"; then
             echo "Alarm service hooked in"
           else
