@@ -1,0 +1,19 @@
+name: Make signing key
+
+on:
+  workflow_dispatch:
+
+jobs:
+  key:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create key
+        env:
+          KP: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          keytool -genkeypair -keystore dinvaya.jks -alias dinvaya -keyalg RSA -keysize 2048 -validity 10000 -storepass "$KP" -keypass "$KP" -dname "CN=Dinvaya, O=Dinvaya, C=IN"
+          base64 -w 0 dinvaya.jks > key.txt
+          echo "COPY THE LONG LINE BELOW THIS LINE"
+          cat key.txt
+          echo ""
+          echo "COPY THE LONG LINE ABOVE THIS LINE"
