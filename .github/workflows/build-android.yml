@@ -67,6 +67,8 @@ jobs:
         run: |
           cd app/android/app/src/main
           sed -i 's#<application#<uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>\n    <uses-permission android:name="android.permission.VIBRATE"/>\n    <application#' AndroidManifest.xml
+          sed -i 's#<application#<uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>\n    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n    <application#' AndroidManifest.xml
+          sed -i 's#</application>#<service android:name="com.dinvaya.daystudio.RingService" android:exported="false" android:foregroundServiceType="mediaPlayback"/>\n        <activity android:name="com.dinvaya.daystudio.RingActivity" android:exported="false" android:showWhenLocked="true" android:turnScreenOn="true" android:excludeFromRecents="true" android:launchMode="singleTask" android:theme="@android:style/Theme.DeviceDefault.NoActionBar"/>\n    </application>#' AndroidManifest.xml
 
           mkdir -p res/drawable
           cat > res/drawable/ic_stat_dinvaya.xml <<'XML'
@@ -85,8 +87,7 @@ jobs:
               rm -f "res/mipmap-$d/ic_launcher_foreground.png"
             done
           fi
-
-      - name: Make the reminder ringtones (same melodies as your app)
+                - name: Make the reminder ringtones (same melodies as your app)
         run: |
           python3 - app/android/app/src/main/res/raw <<'PY'
           import math, struct, wave, os, sys
@@ -130,13 +131,17 @@ jobs:
                           buf[j] += env * wave_fn(kind, f * t)
               peak = max(abs(x) for x in buf) or 1
               scale = 0.9 / peak
-              path = os.path.join(out, "dv_%s.wav" % name)
+              path = os.path.join(out, "ring_%s.wav" % name)
               with wave.open(path, "wb") as w:
                   w.setnchannels(1); w.setsampwidth(2); w.setframerate(SR)
                   w.writeframes(b"".join(struct.pack("<h", int(max(-1, min(1, x * scale)) * 32767)) for x in buf))
           for name, (pattern, notes, total) in S.items():
               render(name, pattern, notes, total)
-          with wave.open(os.path.join(out, "dv_silent.wav"), "wb") as w:
+          for name in list(S.keys()) + ["silent"]:
+              with wave.open(os.path.join(out, "dv_%s.wav" % name), "wb") as w:
+                  w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000)
+                  w.writeframes(b"\x00\x00" * 800)
+          with wave.open(os.path.join(out, "ring_silent.wav"), "wb") as w:
               w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000)
               w.writeframes(b"\x00\x00" * 4000)
           print("ringtones written to", out)
@@ -154,15 +159,281 @@ jobs:
           else
             echo "::warning::Could not apply the repeat-until-dismissed change; alerts will ring once"
           fi
+                - name: Alarm part 1 - the ringing service
+        run: |
+          J=app/android/app/src/main/java/com/dinvaya/daystudio
+          mkdir -p "$J"
+          cat > "$J/RingService.java" <<'JAVA'
+          package com.dinvaya.daystudio;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.res.AssetFileDescriptor;
+          import android.media.AudioAttributes;
+          import android.media.AudioManager;
+          import android.media.MediaPlayer;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.IBinder;
+          import android.os.Looper;
+          import android.os.PowerManager;
+          import android.os.VibrationEffect;
+          import android.os.Vibrator;
+
+          public class RingService extends Service {
+              public static final String STOP = "com.dinvaya.daystudio.STOP";
+              public static final String STOPPED = "com.dinvaya.daystudio.RING_STOPPED";
+              static final String CH = "dv_ring_alarm";
+              MediaPlayer mp;
+              Vibrator vib;
+              PowerManager.WakeLock wl;
+              Handler h = new Handler(Looper.getMainLooper());
+              Runnable cap = new Runnable() { public void run() { stopRing(); } };
+
+              /** Called from the notification plugin the moment a reminder fires. */
+              public static void fromIntent(Context c, Intent in) {
+                  Bundle ex = in.getExtras();
+                  if (ex == null) return;
+                  Notification n = null;
+                  for (String k : ex.keySet()) {
+                      Object o = ex.get(k);
+                      if (o instanceof Notification) { n = (Notification) o; break; }
+                  }
+                  if (n == null) return;
+                  String ch = n.getChannelId();
+                  if (ch == null || !ch.startsWith("dv-") || ch.equals("dv-silent")) return;
+                  Intent s = new Intent(c, RingService.class);
+                  s.putExtra("snd", ch.substring(3));
+                  CharSequence t = n.extras.getCharSequence(Notification.EXTRA_TITLE);
+                  CharSequence x = n.extras.getCharSequence(Notification.EXTRA_TEXT);
+                  s.putExtra("title", t == null ? "Reminder" : t.toString());
+                  s.putExtra("text", x == null ? "" : x.toString());
+                  if (Build.VERSION.SDK_INT >= 26) c.startForegroundService(s); else c.startService(s);
+              }
+
+              @Override public IBinder onBind(Intent i) { return null; }
+
+              @Override public int onStartCommand(Intent in, int flags, int startId) {
+                  if (in == null || STOP.equals(in.getAction())) { stopRing(); return START_NOT_STICKY; }
+                  String snd = in.getStringExtra("snd");
+                  String title = in.getStringExtra("title");
+                  String text = in.getStringExtra("text");
+                  NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      NotificationChannel c = new NotificationChannel(CH, "Ringing alarm", NotificationManager.IMPORTANCE_HIGH);
+                      c.setSound(null, null);
+                      c.enableVibration(false);
+                      c.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+                      nm.createNotificationChannel(c);
+                  }
+                  int fl = PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0);
+                  Intent ra = new Intent(this, RingActivity.class);
+                  ra.putExtra("title", title);
+                  ra.putExtra("text", text);
+                  ra.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                  PendingIntent pa = PendingIntent.getActivity(this, 1, ra, fl);
+                  Intent st = new Intent(this, RingService.class);
+                  st.setAction(STOP);
+                  PendingIntent ps = PendingIntent.getService(this, 2, st, fl);
+                  int icon = getResources().getIdentifier("ic_stat_dinvaya", "drawable", getPackageName());
+                  if (icon == 0) icon = android.R.drawable.ic_lock_idle_alarm;
+                  Notification.Builder b = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(this, CH) : new Notification.Builder(this);
+                  b.setSmallIcon(icon).setContentTitle(title).setContentText(text)
+                   .setCategory(Notification.CATEGORY_ALARM).setOngoing(true)
+                   .setContentIntent(pa).setFullScreenIntent(pa, true)
+                   .setVisibility(Notification.VISIBILITY_PUBLIC)
+                   .addAction(new Notification.Action.Builder(icon, "STOP", ps).build());
+                  if (Build.VERSION.SDK_INT < 26) b.setPriority(Notification.PRIORITY_MAX);
+                  Notification n = b.build();
+                  if (Build.VERSION.SDK_INT >= 29) startForeground(7001, n, 2 /* FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK */);
+                  else startForeground(7001, n);
+                  startRing(snd);
+                  return START_NOT_STICKY;
+              }
+
+              void startRing(String snd) {
+                  releaseAll();
+                  try {
+                      PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+                      wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "dinvaya:ring");
+                      wl.acquire(31 * 60 * 1000L);
+                  } catch (Throwable t) {}
+                  try {
+                      AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+                      int max = am.getStreamMaxVolume(AudioManager.STREAM_ALARM);
+                      if (am.getStreamVolume(AudioManager.STREAM_ALARM) < max * 7 / 10) am.setStreamVolume(AudioManager.STREAM_ALARM, max * 7 / 10, 0);
+                  } catch (Throwable t) {}
+                  try {
+                      int res = getResources().getIdentifier("ring_" + snd, "raw", getPackageName());
+                      if (res == 0) res = getResources().getIdentifier("ring_chime", "raw", getPackageName());
+                      AssetFileDescriptor afd = getResources().openRawResourceFd(res);
+                      mp = new MediaPlayer();
+                      mp.setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ALARM).setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build());
+                      mp.setDataSource(afd.getFileDescriptor(), afd.getStartOffset(), afd.getLength());
+                      afd.close();
+                      mp.setLooping(true);
+                      mp.prepare();
+                      mp.start();
+                  } catch (Throwable t) {}
+                  try {
+                      vib = (Vibrator) getSystemService(VIBRATOR_SERVICE);
+                      long[] p = new long[]{0, 700, 500};
+                      if (Build.VERSION.SDK_INT >= 26) vib.vibrate(VibrationEffect.createWaveform(p, 0)); else vib.vibrate(p, 0);
+                  } catch (Throwable t) {}
+                  h.removeCallbacks(cap);
+                  h.postDelayed(cap, 30 * 60 * 1000L); // safety: stop by itself after 30 minutes
+              }
+
+              void releaseAll() {
+                  try { if (mp != null) { mp.stop(); mp.release(); } } catch (Throwable t) {}
+                  mp = null;
+                  try { if (vib != null) vib.cancel(); } catch (Throwable t) {}
+                  try { if (wl != null && wl.isHeld()) wl.release(); } catch (Throwable t) {}
+              }
+
+              void stopRing() {
+                  h.removeCallbacks(cap);
+                  releaseAll();
+                  try { stopForeground(true); } catch (Throwable t) {}
+                  try { ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).cancelAll(); } catch (Throwable t) {}
+                  try { Intent i = new Intent(STOPPED); i.setPackage(getPackageName()); sendBroadcast(i); } catch (Throwable t) {}
+                  stopSelf();
+              }
+
+              @Override public void onDestroy() { releaseAll(); super.onDestroy(); }
+          }
+
+          JAVA
+                - name: Alarm part 2 - the Stop screen
+        run: |
+          J=app/android/app/src/main/java/com/dinvaya/daystudio
+          cat > "$J/RingActivity.java" <<'JAVA'
+          package com.dinvaya.daystudio;
+
+          import android.app.Activity;
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.IntentFilter;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.GradientDrawable;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+
+          public class RingActivity extends Activity {
+              BroadcastReceiver rcv;
+
+              @Override protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  if (Build.VERSION.SDK_INT >= 27) { setShowWhenLocked(true); setTurnScreenOn(true); }
+                  else getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON | WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD);
+                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  String title = getIntent().getStringExtra("title");
+                  String text = getIntent().getStringExtra("text");
+                  LinearLayout l = new LinearLayout(this);
+                  l.setOrientation(LinearLayout.VERTICAL);
+                  l.setGravity(Gravity.CENTER);
+                  l.setBackgroundColor(Color.parseColor("#2A0A1A"));
+                  l.setPadding(60, 60, 60, 60);
+                  l.addView(tv("Dinvaya reminder", 18, "#F3A6C8", false));
+                  l.addView(tv(title == null ? "Reminder" : title, 32, "#FFFFFF", true));
+                  if (text != null && text.length() > 0) l.addView(tv(text, 18, "#E8D5DE", false));
+                  Button stop = new Button(this);
+                  stop.setText("STOP");
+                  stop.setTextSize(28);
+                  stop.setTextColor(Color.WHITE);
+                  stop.setTypeface(Typeface.DEFAULT_BOLD);
+                  GradientDrawable g = new GradientDrawable();
+                  g.setColor(Color.parseColor("#C2185B"));
+                  g.setCornerRadius(120);
+                  stop.setBackground(g);
+                  stop.setPadding(40, 60, 40, 60);
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                  lp.topMargin = 120;
+                  stop.setLayoutParams(lp);
+                  stop.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { stopRing(false); } });
+                  l.addView(stop);
+                  Button open = new Button(this);
+                  open.setText("Stop and open Dinvaya");
+                  open.setAllCaps(false);
+                  open.setTextSize(16);
+                  LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                  lp2.topMargin = 40;
+                  open.setLayoutParams(lp2);
+                  open.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { stopRing(true); } });
+                  l.addView(open);
+                  setContentView(l);
+                  rcv = new BroadcastReceiver() { public void onReceive(Context c, Intent i) { finish(); } };
+                  IntentFilter f = new IntentFilter(RingService.STOPPED);
+                  if (Build.VERSION.SDK_INT >= 33) registerReceiver(rcv, f, Context.RECEIVER_NOT_EXPORTED); else registerReceiver(rcv, f);
+              }
+
+              TextView tv(String s, int sp, String col, boolean bold) {
+                  TextView t = new TextView(this);
+                  t.setText(s);
+                  t.setTextSize(sp);
+                  t.setTextColor(Color.parseColor(col));
+                  t.setGravity(Gravity.CENTER);
+                  if (bold) t.setTypeface(Typeface.DEFAULT_BOLD);
+                  t.setPadding(0, 16, 0, 16);
+                  return t;
+              }
+
+              void stopRing(boolean open) {
+                  Intent st = new Intent(this, RingService.class);
+                  st.setAction(RingService.STOP);
+                  startService(st);
+                  if (open) {
+                      Intent m = getPackageManager().getLaunchIntentForPackage(getPackageName());
+                      if (m != null) startActivity(m);
+                  }
+                  finish();
+              }
+
+              @Override protected void onDestroy() {
+                  try { if (rcv != null) unregisterReceiver(rcv); } catch (Throwable t) {}
+                  super.onDestroy();
+              }
+          }
+
+          JAVA
+                - name: Alarm part 3 - connect it to your reminders
+        run: |
+          F=$(find app/node_modules/@capacitor/local-notifications/android -name TimedNotificationPublisher.java | head -n 1)
+          echo "Publisher file: $F"
+          cp "$F" "$F.orig"
+          perl -0pi -e 's/(public\s+void\s+onReceive\s*\(\s*Context\s+(\w+)\s*,\s*Intent\s+(\w+)\s*\)\s*\{)/$1\n        try { com.dinvaya.daystudio.RingService.fromIntent($2, $3); } catch (Throwable dvT) {}\n/' "$F"
+          if grep -q RingService "$F"; then
+            echo "Alarm service hooked in"
+          else
+            echo "::warning::Could not hook the alarm service; reminders will use the normal notification sound"
+          fi
 
       - name: Build the APK
         run: |
           cd app/android
           chmod +x gradlew
           if ! ./gradlew assembleDebug --no-daemon; then
-            echo "::warning::Build failed with the repeat change, building again without it"
-            F=$(find ../node_modules/@capacitor/local-notifications/android -name LocalNotificationManager.java | head -n 1)
+            echo "::warning::Build failed with the new alarm, building the previous version instead"
+            F=$(find ../node_modules/@capacitor/local-notifications/android -name TimedNotificationPublisher.java | head -n 1)
             cp "$F.orig" "$F"
+            rm -f app/src/main/java/com/dinvaya/daystudio/RingService.java app/src/main/java/com/dinvaya/daystudio/RingActivity.java
+            for s in sunrise cheer chime bell soft sparkle beep; do cp "app/src/main/res/raw/ring_$s.wav" "app/src/main/res/raw/dv_$s.wav"; done
+            F2=$(find ../node_modules/@capacitor/local-notifications/android -name LocalNotificationManager.java | head -n 1)
+            cp "$F2.orig" "$F2"
             ./gradlew assembleDebug --no-daemon
           fi
           cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/Dinvaya.apk"
@@ -173,4 +444,4 @@ jobs:
         run: |
           gh release create "apk-${{ github.run_number }}" Dinvaya.apk \
             --title "Dinvaya APK build ${{ github.run_number }} ($MODE)" \
-            --notes "Android app with reminders that ring when the app is closed. Mode: $MODE."
+            --notes "Android app with a real alarm: rings until you press Stop, even when the app is closed. Mode: $MODE."
