@@ -453,6 +453,7 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           cd app/android
+          sed -i -E "s/versionCode [0-9]+/versionCode $((100 + ${{ github.run_number }}))/" app/build.gradle
           ./gradlew assembleRelease --no-daemon
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/dinvaya.jks"
